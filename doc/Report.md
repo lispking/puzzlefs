@@ -102,6 +102,8 @@ sudo apt -y install clang-format clang-tidy clang-tools clang clangd libc++-dev 
 sudo apt install -y capnproto skopeo umoci tree jq
 ```
 
+---
+
 ## 编译和挂载 PuzzleFS 镜像
 
 ### 测试文件准备
@@ -268,3 +270,39 @@ capnp convert binary:json ~/puzzlefs/format/metadata.capnp InodeVector < /tmp/pu
 ```
 
 > 至此，PuzzleFS 镜像则准备完成，接下来，就可以开始从源码级别解刨 PuzzleFS 实现。
+
+--- 
+
+## 解刨前，需了解的知识
+
+### [Image Format Specification](https://github.com/opencontainers/image-spec/blob/main/spec.md)
+
+OCI manifest主要由一个或多个文件列表（组成一个完整的可运行的文件系统）、索引和配置等元数据组成。其中，配置文件包含应用参数、环境变量等信息。索引文件主要是文件清单列表描述，不同平台可能会所有差异。
+
+![00-oci-spec](./images/00-oci-spec.png)
+
+OCI 镜像构建完成后，可通过名称方式发现和下载镜像，以及通过哈希方式进行验证，通过签名进行信任，并解压到 OCI 运行时中。
+
+![01-oci-spec](./images/01-oci-spec.png)
+
+OCI 规范主要包括下面这些组件：
+* Image Manifest - 有关容器镜像文件清单说明
+* Image Index - 有关 Manifest 索引列表说明
+* Image Layout - 有关镜像中的文件系统布局说明
+* Filesystem Layer - 有关容器文件系统的变化说明
+* Image Configuration - 有关镜像的配置说明
+* Conversion - 有关转换如何发生的说明
+* Artifacts Guidance - 除 OCI 镜像之外的打包规范说明
+* Descriptor - 有关类型、元数据和内容地址等的说明
+
+## 源码目录分析
+
+该工程主要包含`puzzlefs-lib`库和`exe`可执行两部分：
+
+* `puzzlefs-lib`：PuzzleFS 库的实现
+  - `format`：用于 PuzzleFS 格式的序列化和反序列化
+  - `builder`：用于构建 PuzzleFS 镜像
+  - `extractor`：用于解压 PuzzleFS 镜像
+  - `reader`： 用于将 PuzzleFS 镜像挂载到 FUSE（文件系统）的模块。
+* `exe/`：包含上述内容的可执行文件封装
+
