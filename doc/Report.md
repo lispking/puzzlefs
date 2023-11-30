@@ -1,4 +1,4 @@
-# PuzzleFS 源码分析报告
+# PuzzleFS - 下一代 Linux 容器文件系统之源码分析报告
 
 PuzzleFS 项目地址：https://github.com/project-machine/puzzlefs
 
@@ -6,7 +6,7 @@ PuzzleFS 项目地址：https://github.com/project-machine/puzzlefs
 
 ---
 
-## 介绍
+## PuzzleFS 项目介绍
 
 思科开发者 `Ariel Miculas` 在[内核邮件列表](https://lore.kernel.org/rust-for-linux/20230609063118.24852-1-amiculas@cisco.com/)中，发布了用 Rust 写的 PuzzleFS 文件系统驱动，以征求其他开发者的意见，目前这一驱动程序处于“概念验证”阶段。
 
@@ -285,6 +285,8 @@ OCI 规范主要包括下面这些组件：
 * Artifacts Guidance - 除 OCI 镜像之外的打包规范说明
 * Descriptor - 有关类型、元数据和内容地址等的说明
 
+---
+
 ## PuzzleFS 源码分析
 
 该工程主要包含`puzzlefs-lib`库和`exe`可执行两部分：
@@ -293,9 +295,10 @@ OCI 规范主要包括下面这些组件：
   - `format`：用于 PuzzleFS 格式的序列化和反序列化
   - `builder`：用于构建 PuzzleFS 镜像
   - `extractor`：用于解压 PuzzleFS 镜像
-  - `reader`： 用于将 PuzzleFS 镜像挂载到 FUSE（文件系统）的模块。
+  - `reader`： 用于将 PuzzleFS 镜像挂载到 `FUSE`（文件系统）的模块。
 * `exe/`：可执行文件封装主要是对一些命令和库进行组合，将其整合在一起。这个封装没有什么特别需要解读的地方，因为它只是简单地将相关功能集成在一起，方便用户使用。
 
+---
 
 ### PuzzleFS 格式
 
@@ -411,3 +414,221 @@ pub struct MetadataBlob {
 `::capnp::serialize::BufferSegments<Mmap>` 是一个泛型类型，表示用于存储元数据的内存映射（`Mmap`）缓冲区。`Mmap` 是一种内存映射文件的技术，可以将文件内容映射到内存中，以便更快地访问和处理文件数据。
 
 `crate::metadata_capnp::inode_vector::Owned` 是一个泛型类型，表示元数据 BLOB 中的 inode 向量。inode 向量可能是一个包含 inode 结构体的列表或数组，用于存储文件系统中的元数据。
+
+---
+
+### PuzzleFS 镜像构建
+
+> 用于处理文件系统、压缩、加密或构建的工具或库。它提供了一些方法来操作文件系统、处理压缩、进行测试，并且与文件系统的可复现性或安全性有关。
+
+#### 核心结构体定义
+
+> 文件位于 `puzzlefs-lib/src/builder/filesystem.rs`
+
+```rust
+struct ReaderLink {
+    file: PathBuf,
+    done: bool,
+}
+
+/// A structure used to chain multiple readers, similar to
+/// [chain](https://doc.rust-lang.org/std/io/trait.Read.html#method.chain)
+/// and [multi_reader](https://docs.rs/multi_reader/latest/multi_reader/)
+pub struct FilesystemStream {
+    reader_chain: Vec<ReaderLink>,
+    current_reader: Option<std::fs::File>,
+}
+```
+
+该部分主要由两个结构体：`ReaderLink` 和 `FilesystemStream` 组成。
+
+1. `ReaderLink` 结构体包含两个字段：
+  - `file`：一个 `PathBuf` 类型的字段，表示文件的路径。
+  - `done`：一个 `bool` 类型的字段，表示读取操作是否完成。
+
+2. `FilesystemStream` 结构体用于链接多个 `Reader`，类似于 `std::io::Read` trait 的 `chain` 方法和 `multi_reader` 库，该做法的目的是方便按顺序读取多个文件。它包含两个字段：
+  - `reader_chain`：一个 `Vec<ReaderLink>` 类型的字段，用于存储多个 `ReaderLink`，实现类似于链式文件读取的操作，例如，在读取一个文件之后自动切换到下一个文件。这种设计可以方便地实现流水线式的文件处理任务。
+  - `current_reader`：一个 `Option<std::fs::File>` 类型的字段，表示当前正在使用的读者。
+
+3. 两个结构体关系如下图所述：
+
+![03-builder-filesystem](images/03-builder-filesystem.png)
+
+
+#### 核心函数作用解读
+
+> 文件位于 `puzzlefs-lib/src/builder.rs`
+
+* `walker``: 用于遍历文件系统或目录结构。
+* `add_entry`, `serialize_manifest`, `serialize_metadata`: 与将文件系统或目录结构的信息添加到某个数据结构或序列化有关。
+* `process_chunks<C>`, `build_delta<C>`: 与处理文件或数据块的压缩相关，其中， `C` 代表某种压缩算法。
+* `lookup_existing`: 用于查找或查询文件系统中的现有文件或目录。
+* `build_initial_rootfs<C>`, `add_rootfs_delta<C>`: 与构建或修改文件系统根目录有关。
+* `enable_fs_verity`: 用于启用文件系统 verity 相关的功能。
+* `build_test_fs`, `test_fs_generation`, `test_delta_generation`: 与测试文件系统或其生成有关。
+* `do_vecs_match<T>`: 用于比较两个序列或向量是否相等的。
+* `get_image_blobs`: 用于获取镜像或数据块的。
+* `same_dir_reproducible`, `same_dir_contents_reproducible`: 与检查目录或文件内容的可复现性有关。
+* `test_reproducibility`: 用于测试或验证文件系统的可复现性。
+* `build_dummy_fs`: 用于构建虚拟的文件系统。
+
+---
+
+### PuzzleFS 镜像解压
+
+> 用于从容器或镜像中提取文件系统的工具或库。它提供了一些方法来处理文件和目录的创建、所有权和权限。
+
+> 文件位于 `puzzlefs-lib/src/extractor.rs`
+
+* `runs_privileged`: 用于检查当前运行是否具有 root 权限。
+* `PuzzleFS`, `WalkPuzzleFS``: 用于处理文件系统的类或结构体。
+* `makedev`, `mknod`, `Mode`, `SFlag`: 与文件系统或设备创建有关的函数或常量。
+* `chown`, `mkfifo`, `symlinkat`, `Gid`, `Uid`: 与文件系统所有权、符号链接或 FIFO 管道创建有关的函数或常量。
+* `HashMap`, `OsStr`, `Path`, `PathBuf`: 与文件系统路径或数据结构有关的类型。
+* `fs`, `io`: 与文件系统操作或输入/输出操作有关的模块。
+
+---
+
+### PuzzleFS 镜像挂载
+
+> 用于实现一个基于 FUSE 的文件系统，并可能与 puzzles 或者 cryptographic hash 有关。
+
+#### `PuzzleFS`结构体定义
+
+> 文件位于 `puzzlefs-lib/src/reader/puzzlefs.rs`
+
+> 用于在Rust中实现镜像挂载功能，并与其他组件（如`Fuse`）协同工作，表示一个包含镜像、层（layer）元数据、验证数据和可选验证映像清单的文件系统。
+
+```rust
+pub struct PuzzleFS {
+    pub oci: Arc<Image>,
+    layers: Vec<MetadataBlob>,
+    pub verity_data: Option<VerityData>,
+    pub manifest_verity: Option<Vec<u8>>,
+}
+```
+以下是结构体中各属性的解释：
+1. `oci`：`Arc<Image>`类型，`Arc`用于确保镜像在多个引用之间共享，而不会创建不必要的副本。
+2. `layers`：`Vec<MetadataBlob>`类型，表示镜像的各个层。`MetadataBlob`定义参考 `Format 章节`的描述。
+3. `verity_data`：`Option<VerityData>`类型，表示验证数据。验证数据用于确保镜像在传输过程中不被篡改。可选字段，意味着并非所有`PuzzleFS`实例都需要验证数据。
+4. `manifest_verity`：`Option<Vec<u8>>`类型的，表示镜像清单的验证。可选字段，用于确保镜像的完整性。清单验证通常是通过将清单内容与预期的哈希值进行比较来实现的。
+
+
+#### `Fuse`结构体定义
+
+> 文件位于 `puzzlefs-lib/src/reader/fuse.rs`
+
+```rust
+pub enum PipeDescriptor {
+    UnnamedPipe(PipeWriter),
+    NamedPipe(PathBuf),
+}
+
+pub struct Fuse {
+    pfs: PuzzleFS,
+    sender: Option<std::sync::mpsc::Sender<()>>,
+    init_notify: Option<PipeDescriptor>,
+    // TODO: LRU cache inodes or something. I had problems fiddling with the borrow checker for the
+    // cache, so for now we just do each lookup every time.
+}
+```
+
+> 用于实现基于 FUSE（Filesystem in Userspace）的文件系统，允许用户空间实现文件系统功能。`PipeDescriptor` 用于在进程间通信，`Fuse` 结构体则用于处理 FUSE 文件系统的相关操作。
+
+* `PipeDescriptor` 枚举类型有两个成员：
+  - `UnnamedPipe`：`PipeWriter` 实例，表示未命名管道。
+  - `NamedPipe`：`PathBuf` 实例，表示已命名管道。
+
+* `Fuse` 结构体有以下成员：
+  - `pfs`：`PuzzleFS` 实例，表示 Puzzle 文件系统。
+  - `sender`：`Option<std::sync::mpsc::Sender<()>>` 类型，用于发送消息。
+  - `init_notify`：一个 `Option<PipeDescriptor>` 类型，表示一个初始化通知管道。
+  - 注释中提到了一个 LRU 缓存，但由于借用检查器的问题，暂时每次都进行查找。
+
+
+#### `WalkPuzzleFS`结构体定义
+
+> 文件位于 `puzzlefs-lib/src/reader/walk.rs`
+
+```rust
+/// A in iterator over a PuzzleFS filesystem. This iterates breadth first, since file content is
+/// stored that way in a puzzlefs image so it'll be faster reading actual content if clients want
+/// to do that.
+pub struct WalkPuzzleFS<'a> {
+    pfs: &'a mut PuzzleFS,
+    q: VecDeque<DirEntry>,
+}
+
+pub struct DirEntry {
+    oci: Arc<Image>,
+    pub path: PathBuf,
+    pub inode: Inode,
+}
+```
+
+> 用于遍历 Puzzle 文件系统，以便于查询和操作文件系统中的内容。迭代器 `WalkPuzzleFS` 负责遍历文件系统，而 `DirEntry` 表示每个目录 entry，便于进一步处理。
+
+* `WalkPuzzleFS` 表示一个遍历 Puzzle 文件系统的迭代器。它采用广度优先遍历策略，因为文件内容在 Puzzle 文件系统镜像中就是以这种方式存储的，这样在实际内容读取时会更快。结构体有以下成员：
+  - `pfs`：`PuzzleFS` 实例，表示一个 Puzzle 文件系统。
+  - `q`：`VecDeque<DirEntry>` 类型，表示一个待遍历的目录 entry 队列。
+
+* `DirEntry` 表示一个目录 entry，包含镜像、路径和 inode 编号等信息。结构体有以下成员：
+  - `oci`：`Arc<Image>` 类型，表示一个镜像。
+  - `path`：`PathBuf` 类型，表示目录 entry 的路径。
+  - `inode`：`Inode` 类型，表示目录 entry 的 inode 编号。
+
+#### 核心函数作用解读
+
+> 文件位于 `puzzlefs-lib/src/reader.rs`
+
+* `mount_option_from_str` 函数：用于从字符串`s`中解析出对应的 `FUSE` 挂载选项（`fuse_ffi::MountOption`）。函数采用匹配语法 `match` 来根据字符串`s`的值进行匹配，然后返回相应的挂载选项。以下是代码中各挂载选项的描述：
+  - `auto_unmount`：自动卸载文件系统。
+  - `allow_other`：允许其他用户访问文件系统。
+  - `allow_root`：允许root用户访问文件系统。
+  - `default_permissions`：使用默认权限。
+  - `dev`：启用设备文件。
+  - `nodev`：禁用设备文件。
+  - `suid`：启用 `SUID`（`Set UID`）特权。
+  - `nosuid`：禁用 `SUID` 特权。
+  - `ro`：只读挂载。
+  - `rw`：读写挂载。
+  - `exec`：启用可执行文件。
+  - `noexec`：禁用可执行文件。
+  - `atime`：使用文件访问时间（`ATIME`）更新。
+  - `noatime`：不使用文件访问时间更新。
+  - `dirsync`：启用目录同步。
+  - `sync`：启用同步挂载。
+  - `async`：启用异步挂载。
+  - `fsname`：设置文件系统名称。
+  - `subtype`：设置文件系统子类型。
+  - 如果`s`的字符串值不匹配以上任何一种挂载选项，则返回`fuse_ffi::MountOption::CUSTOM`（表示自定义挂载选项），并将字符串`s`作为参数传递。
+
+* `mount`函数：用于将一个镜像（Image）挂载到指定的目录（mountpoint）。以下是代码的主要部分及其功能：
+  * 参数解读：
+    - `image`：要挂载的镜像。
+    - `tag`：镜像的标签。
+    - `mountpoint`：要挂载镜像到的目录路径。
+    - `options`：字符串切片，表示挂载选项。
+    - `init_notify`：可选的管道描述符，用于初始化通知。
+    - `manifest_verity`：可选的字节切片，表示镜像清单的验证。
+  * 函数流程：
+    - 首先，尝试打开一个名为`PuzzleFS`的文件系统，该文件系统包含镜像、标签和可选的验证。
+    - 然后，创建一个`Fuse`实例，将`PuzzleFS`挂载到`mountpoint`。
+    - 使用`fuse_ffi::mount2`函数将`Fuse`实例挂载到指定路径，并传递挂载选项。（另一个 `spawn_mount` 函数就不展开说明，差异点是此处调用`fuse_ffi::spawn_mount2`实现）
+    - 最后，返回成功挂载的`Ok(())`结果。
+
+---
+
+## [Chunking 文章解读](chunking.md)
+
+这篇文章主要讨论了如何将文件系统进行分块的技术。作者提出了两种分块策略：基于`Rabin指纹/滚动哈希`的方法和基于`内容定义`的分块方法。
+
+首先，作者建议使用`Rabin指纹/滚动哈希技术`进行分块，并提到了 `casync` 作为相关先例。接下来，作者阐述了如何将文件系统内容序列化为一个流，以便进行内容定义的分块。在这个过程中，作者强调了对目录条目进行广度优先遍历，以便更好地共享文件系统内容。
+
+文章还讨论了两种分块策略的优缺点。
+* 一方面，让镜像定义自己的参数可以根据特定镜像进行微调，以获得更好的更新结果。
+* 另一方面，硬编码参数可以使镜像之间的共享更多，并使不同的镜像构建者使用相同的算法和参数。
+
+最后，作者表示将选择留给了读者，例如哈希、参数等。这意味着读者可以根据自己的需求和偏好选择合适的技术和参数。
+
+简单来说，这篇文章介绍了如何在不同镜像之间共享文件系统内容的技术和方法，并讨论了两种分块策略的优缺点。作者鼓励读者根据自己的需求选择最适合的分块方法。
