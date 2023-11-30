@@ -1,14 +1,4 @@
----
-# marp: true
-title: Marp CLI example
-description: Hosting Marp slide deck on the web
-theme: uncover
-transition: fade
-paginate: true
-_paginate: false
----
-
-# <!-- fit --> PuzzleFS 分析报告
+# PuzzleFS 源码分析报告
 
 PuzzleFS 项目地址：https://github.com/project-machine/puzzlefs
 
@@ -271,7 +261,7 @@ capnp convert binary:json ~/puzzlefs/format/metadata.capnp InodeVector < /tmp/pu
 
 > 至此，PuzzleFS 镜像则准备完成，接下来，就可以开始从源码级别解刨 PuzzleFS 实现。
 
---- 
+---
 
 ## 解刨前，需了解的知识
 
@@ -295,7 +285,7 @@ OCI 规范主要包括下面这些组件：
 * Artifacts Guidance - 除 OCI 镜像之外的打包规范说明
 * Descriptor - 有关类型、元数据和内容地址等的说明
 
-## 源码目录分析
+## PuzzleFS 源码分析
 
 该工程主要包含`puzzlefs-lib`库和`exe`可执行两部分：
 
@@ -304,5 +294,120 @@ OCI 规范主要包括下面这些组件：
   - `builder`：用于构建 PuzzleFS 镜像
   - `extractor`：用于解压 PuzzleFS 镜像
   - `reader`： 用于将 PuzzleFS 镜像挂载到 FUSE（文件系统）的模块。
-* `exe/`：包含上述内容的可执行文件封装
+* `exe/`：可执行文件封装主要是对一些命令和库进行组合，将其整合在一起。这个封装没有什么特别需要解读的地方，因为它只是简单地将相关功能集成在一起，方便用户使用。
 
+
+### PuzzleFS 格式
+
+PuzzleFS 主要由两部分组成：一个用于存储 inode 信息的元数据格式，以及由各种分块算法定义的实际文件系统数据块。其中，所有枚举值均编码为 u32；所有编码均为小端。
+
+所有 PuzzleFS 块均由以下结构体封装：
+
+```rust
+enum hash {
+  sha256,
+}
+
+typedef hash_value byte[32] // 对于 sha256
+
+enum blob_type {
+  root,
+  metadata,
+  file,
+}
+
+type puzzlefs_blob {
+  enum hash;
+  u64 references_len;
+  hash_value references[];
+  blob_type type;
+  //  followed by the actual blob
+}
+```
+
+> 下面通过一张 UML 图来解读 `format/types.rs` 文件系统组件的关系
+
+![02-format-types](images/02-format-types.png)
+
+
+#### 根文件系统（Rootfs）的结构体定义
+
+```rust
+pub struct Rootfs {
+    pub metadatas: Vec<BlobRef>,
+    pub fs_verity_data: VerityData,
+    pub manifest_version: u64,
+}
+```
+
+> 用于描述一个 Rootfs 实例，其中包含了文件系统的元数据、完整性数据和清单版本号。这有助于系统和应用程序正确地处理和验证根文件系统的内容。
+
+结构体包含以下成员：
+
+1. `metadatas`：一个`Vec<BlobRef>`类型的成员，表示根文件系统的元数据。`BlobRef`可能是一个指向文件系统元数据的引用或指针。
+2. `fs_verity_data`：一个`VerityData`类型的成员，表示文件系统的完整性数据。`VerityData`可能是一个用于验证文件系统数据完整性的结构体或类。
+3. `manifest_version`：一个`u64`类型的成员，表示清单（manifest）的版本。这个版本号用于识别和区分不同的清单版本。
+
+
+#### Blob 引用（BlobRef）的结构体定义
+
+```rust
+pub struct BlobRef {
+    pub digest: [u8; SHA256_BLOCK_SIZE],
+    pub offset: u64,
+    pub compressed: bool,
+}
+```
+
+> 用于文件系统中引用和标识 BLOB 数据。通过存储 BLOB 的哈希值、偏移量和压缩状态，这个结构体为文件系统的管理和操作提供了有关 BLOB 信息的基本概述。
+
+结构体包含以下成员：
+
+1. `digest`：一个字节数组（`[u8; SHA256_BLOCK_SIZE]`），用于存储 BLOB 的哈希值。SHA256 是一种加密哈希算法，用于生成一个固定长度的哈希值。这个字节数组的长度为 SHA256 块大小，通常为 64 字节。
+2. `offset`：一个 `u64` 类型的成员，表示 BLOB 在文件系统中的偏移量。这个偏移量用于定位 BLOB 在文件系统中的位置。
+3. `compressed`：一个布尔值（`bool` 类型），表示 BLOB 是否已压缩。如果为 `true`，则表示 BLOB 已压缩；如果为 `false`，则表示 BLOB 未压缩。
+
+#### inode（节点）的结构体定义
+
+```rust
+pub struct Inode {
+    pub ino: Ino,
+    pub mode: InodeMode,
+    pub uid: u32,
+    pub gid: u32,
+    pub permissions: u16,
+    pub additional: Option<InodeAdditional>,
+}
+```
+
+> 用于表示文件系统中的 inode，包含了识别和描述 inode 所需的基本信息。这有助于管理和操作文件系统中的文件和目录。
+
+结构体包含以下成员：
+1. `ino`：一个 `Ino` 类型的成员，表示 inode 的唯一标识符。inode 是文件系统中的一个基本概念，用于标识文件和目录。
+2. `mode`：一个 `InodeMode` 类型的成员，表示 inode 的模式。`InodeMode` 可能是一个枚举类型，用于表示 inode 是文件还是目录，以及文件或目录的权限设置。
+3. `uid`：一个 `u32` 类型的成员，表示 inode 所属的用户 ID。用户 ID 用于识别文件或目录的所有者。
+4. `gid`：一个 `u32` 类型的成员，表示 inode 所属的组 ID。组 ID 用于识别文件或目录的所有者所属的组。
+5. `permissions`：一个 `u16` 类型的成员，表示 inode 的权限。这些权限通常包括读、写和执行权限，用于控制用户和组对文件或目录的访问。
+6. `additional`：一个 `Option<InodeAdditional>` 类型的成员，表示额外的 inode 信息。`InodeAdditional` 可能是一个包含更多详细信息的结构体或类。这个选项值为 `None` 时，表示没有额外的 inode 信息。
+
+
+#### 元数据 BLOB（MetadataBlob）的结构体定义
+
+```rust
+pub struct MetadataBlob {
+    reader: message::TypedReader<
+        ::capnp::serialize::BufferSegments<Mmap>,
+        crate::metadata_capnp::inode_vector::Owned,
+    >,
+}
+```
+
+> 用于表示一个元数据 BLOB，包含了读取和解析元数据所需的信息。这个结构体通常用于处理和分析文件系统中的元数据，以便更好地管理和操作文件。
+
+结构体只有一个成员 `reader`：
+
+这是一个 `message::TypedReader` 类型的成员，用于读取和解析元数据 BLOB。`TypedReader` 是 `Cap'n Proto` 序列化库中的一个类型，用于读取和处理特定类型的数据。
+
+`::capnp::serialize::BufferSegments<Mmap>` 是一个泛型类型，表示用于存储元数据的内存映射（`Mmap`）缓冲区。`Mmap` 是一种内存映射文件的技术，可以将文件内容映射到内存中，以便更快地访问和处理文件数据。
+
+`crate::metadata_capnp::inode_vector::Owned` 是一个泛型类型，表示元数据 BLOB 中的 inode 向量。inode 向量可能是一个包含 inode 结构体的列表或数组，用于存储文件系统中的元数据。
